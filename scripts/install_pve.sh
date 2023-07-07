@@ -208,42 +208,6 @@ if [ -f "/etc/network/interfaces.new" ]; then
 fi
 }
 
-fix_interfaces_ipv6_auto_type(){
-chattr -i $1
-while IFS= read -r line
-do
-    # 检测以 "iface" 开头且包含 "inet6 auto" 的行
-    if [[ $line == "iface ${interface} inet6 auto" ]]; then
-        output=$(ip addr)
-        matches=$(echo "$output" | grep "inet6.*global dynamic")
-        if [ -n "$matches" ]; then
-            # SLAAC动态分配，暂不做IPV6的处理
-            sed -i "/iface $interface inet6 auto/d" $1
-            echo "$interface" > "/root/iface_auto.txt"
-        else
-            # 将 "auto" 替换为 "static"
-            modified_line="${line/auto/static}"
-            echo "$modified_line"
-            # 添加静态IPv6配置信息
-            ipv6_prefixlen=$(ifconfig ${interface} | grep -oP 'prefixlen \K\d+' | head -n 1)
-            # 获取IPv6地址
-            # ipv6_address=$(ifconfig ${interface} | grep -oE 'inet6 ([0-9a-fA-F:]+)' | awk '{print $2}' | head -n 1)
-            ipv6_address=$(ip -6 addr show dev ${interface} | awk '/inet6 .* scope global dynamic/{print $2}')
-            # 提取地址部分
-            ipv6_address=${ipv6_address%%/*}
-            ipv6_gateway=$(ip -6 route show | awk '/default via/{print $3}')
-            echo "    address ${ipv6_address}/${ipv6_prefixlen}"
-            echo "    gateway ${ipv6_gateway}"
-        fi
-    else
-        echo "$line"
-    fi
-done < $1 > /tmp/interfaces.modified
-chattr -i $1
-mv -f /tmp/interfaces.modified $1
-chattr +i $1
-rm -rf /tmp/interfaces.modified
-}
 
 check_cdn() {
   local o_url=$1
@@ -326,12 +290,6 @@ check_ipv4(){
     export IPV4
 }
 
-statistics_of_run-times() {
-COUNT=$(
-  curl -4 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2FspiritLHLS%2Fpve&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1 ||
-  curl -6 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2FspiritLHLS%2Fpve&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1) &&
-  TODAY=$(expr "$COUNT" : '.*\s\([0-9]\{1,\}\)\s/.*') && TOTAL=$(expr "$COUNT" : '.*/\s\([0-9]\{1,\}\)\s.*')
-}
 
 # 前置环境安装
 if [ "$(id -u)" != "0" ]; then
@@ -433,20 +391,8 @@ output=$(dmidecode -t system)
 if [[ $output == *"Hetzner_vServer"* ]]; then
     prebuild_ifupdown2
 fi
-# # 特殊处理OVH
-# if dig -x $main_ipv4 | grep -q "vps.ovh"; then
-#     prebuild_ifupdown2
-# fi
-# 统计运行次数
-statistics_of_run-times
-# 检测是否已重启过
-if [ ! -f "/root/reboot_pve.txt" ]; then
-    echo "1" > "/root/reboot_pve.txt"
-    _green "Please execute reboot to reboot the system and then execute this script again"
-    _green "Please wait at least 20 seconds after logging in with SSH again before executing this script."
-    _green "请执行 reboot 重启系统后再次执行本脚本，再次使用SSH登录后请等待至少20秒再执行本脚本"
-    exit 1
-fi
+
+
 
 ########## 正式开始安装
 
@@ -512,19 +458,6 @@ if [[ -z "${CN}" ]]; then
   fi
 fi
 
-# 再次预检查 
-apt-get install gnupg -y
-if [ $(uname -m) != "x86_64" ] || [ ! -f /etc/debian_version ] || [ $(grep MemTotal /proc/meminfo | awk '{print $2}') -lt 2000000 ] || [ $(grep -c ^processor /proc/cpuinfo) -lt 2 ] || [ $(ping -c 3 google.com > /dev/null 2>&1; echo $?) -ne 0 ]; then
-  _red "Error: This system does not meet the minimum requirements for Proxmox VE installation."
-  _yellow "Do you want to continue the installation? (Enter to not continue the installation by default) (y/[n])"
-  reading "是否要继续安装？(回车则默认不继续安装) (y/[n]) " confirm
-  echo ""
-  if [ "$confirm" != "y" ]; then
-    exit 1
-  fi
-else
-  _green "The system meets the minimum requirements for Proxmox VE installation."
-fi
 
 # 新增pve源
 apt-get install lsb-release -y
@@ -536,12 +469,7 @@ case $version in
       repo_url="deb https://mirrors.tuna.tsinghua.edu.cn/proxmox/debian/pve ${version} pve-no-subscription"
     fi
     ;;
-  # bookworm)
-  #   repo_url="deb http://download.proxmox.com/debian/pve ${version} pvetest"
-  #   if [[ -n "${CN}" ]]; then
-  #     repo_url="deb https://mirrors.tuna.tsinghua.edu.cn/proxmox/debian/pve ${version} pvetest"
-  #   fi
-  #   ;;
+  
   *)
     _red "Error: Unsupported Debian version"
     _yellow "Do you want to continue the installation? (Enter to not continue the installation by default) (y/[n])"
@@ -729,17 +657,7 @@ systemctl start check-dns.service
 # 清除防火墙
 install_package ufw
 ufw disable
-# 查询公网IPV4
-check_ipv4
-# 打印安装后的信息
-url="https://${IPV4}:8006/"
-_green "Installation complete, please open HTTPS web page $url"
-_green "The username and password are the username and password used by the server (e.g. root and root user's password)"
-_green "If the login is correct please do not rush to reboot the system, go to execute the commands of the pre-configured environment and then reboot the system"
-_green "If there is a problem logging in the web side is not up, wait 10 seconds and restart the system to see"
-_green "安装完毕，请打开HTTPS网页 $url"
-_green "用户名、密码就是服务器所使用的用户名、密码(如root和root用户的密码)"
-_green "如果登录无误请不要急着重启系统，去执行预配置环境的命令后再重启系统"
-_green "如果登录有问题web端没起来，等待10秒后重启系统看看"
+
+
 rm -rf /root/reboot_pve.txt
 rm -rf /root/ifupdown2_installed.txt
